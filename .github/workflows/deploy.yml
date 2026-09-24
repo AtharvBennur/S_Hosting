@@ -49,6 +49,8 @@ jobs:
       - name: Install and build frontend
         working-directory: frontend
         shell: bash
+        env:
+          VITE_API_BASE: http://13.48.137.1:8001
         run: |
           set -euo pipefail
           npm ci
@@ -61,7 +63,11 @@ jobs:
           if [ -n "${BACKEND_ENV:-}" ]; then
             printf '%s\n' "$BACKEND_ENV" > backend/.env
           elif [ ! -f backend/.env ]; then
-            cp backend/.env.example backend/.env
+            cp backend/ec2.env.example backend/.env
+          fi
+          if grep -qE 'PROJECT_REF|POOLER_HOST' backend/.env; then
+            echo 'BACKEND_ENV must contain the real Supabase project ref and pooler host.' >&2
+            exit 1
           fi
 
       - name: Restart backend and frontend
