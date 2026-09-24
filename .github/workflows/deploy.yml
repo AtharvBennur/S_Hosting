@@ -103,6 +103,20 @@ jobs:
             > frontend.log 2>&1 < /dev/null &
           echo $! > .frontend.pid
 
-          sleep 5
-          curl --fail --silent --show-error http://127.0.0.1:8001/api/health
+          for _ in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8001/api/health; then
+              break
+            fi
+            if ! kill -0 "$(cat .backend.pid)" 2>/dev/null; then
+              echo 'Backend exited before becoming healthy. backend.log:' >&2
+              cat backend.log >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          if ! curl --fail --silent --show-error http://127.0.0.1:8001/api/health; then
+            echo 'Backend did not become healthy within 30 seconds. backend.log:' >&2
+            cat backend.log >&2
+            exit 1
+          fi
           curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
