@@ -1,7 +1,7 @@
 import React, { createContext, ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 
-export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8001';
+export const API_BASE = import.meta.env.VITE_API_BASE || '';
 export type Role = 'MINISTRY' | 'STATE_NODAL_AUTHORITY' | 'DISTRICT_AUTHORITY' | 'MEMBER_OF_PARLIAMENT';
 export type User = {
   id: number; name: string; email: string; identity_id: string; role: Role; status: string;

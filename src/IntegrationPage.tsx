@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import axios from 'axios';
 import { useLocation } from 'react-router-dom';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 const labels: Record<string, string> = { 
   SANCTIONED_WORKS: 'Sanctioned works', 
   COMPLETED_WORKS: 'Completed works', 

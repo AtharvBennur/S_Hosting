@@ -2,7 +2,7 @@ import { ChangeEvent, FormEvent, useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024;
 const ALLOWED_EXTENSIONS = new Set(['.csv', '.xlsx', '.xls']);
 

@@ -1,5 +1,0 @@
-Alembic migrations for the MPLADS monitoring database.
-
-Apply migrations with:
-
-    .venv\\Scripts\\alembic.exe upgrade head
