@@ -69,6 +69,7 @@ jobs:
             echo 'BACKEND_ENV must contain the real Supabase project ref and pooler host.' >&2
             exit 1
           fi
+          (cd backend && .venv/bin/alembic upgrade head)
 
       - name: Restart backend and frontend
         shell: bash

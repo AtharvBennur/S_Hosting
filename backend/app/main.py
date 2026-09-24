@@ -220,6 +220,11 @@ def initialize_database():
     if settings.app_env.lower() in {'production', 'prod'} and settings.auth_secret == 'change-this-development-secret':
         raise RuntimeError('AUTH_SECRET must be configured outside development.')
     if engine.dialect.name != 'sqlite':
+        db = SessionLocal()
+        try:
+            _seed_demo_accounts(db)
+        finally:
+            db.close()
         _ensure_default_demo()
         return
     Base.metadata.create_all(bind=engine)
