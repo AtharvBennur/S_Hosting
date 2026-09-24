@@ -1,0 +1,102 @@
+name: Deploy MPLADS to EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mplads-ec2-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build and deploy on EC2
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+
+    env:
+      BACKEND_ENV: ${{ secrets.BACKEND_ENV }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv backend/.venv
+          backend/.venv/bin/python -m pip install --upgrade pip
+          backend/.venv/bin/pip install -r backend/requirements.txt
+
+      - name: Install and build frontend
+        working-directory: frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Configure backend environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${BACKEND_ENV:-}" ]; then
+            printf '%s\n' "$BACKEND_ENV" > backend/.env
+          elif [ ! -f backend/.env ]; then
+            cp backend/.env.example backend/.env
+          fi
+
+      - name: Restart backend and frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          stop_process() {
+            local pid_file="$1"
+            if [ -f "$pid_file" ]; then
+              pid="$(cat "$pid_file")"
+              if kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" || true
+                for _ in {1..20}; do
+                  kill -0 "$pid" 2>/dev/null || break
+                  sleep 1
+                done
+              fi
+              rm -f "$pid_file"
+            fi
+          }
+
+          stop_process .backend.pid
+          stop_process .frontend.pid
+
+          nohup backend/.venv/bin/python -m uvicorn app.main:app \
+            --app-dir backend --host 0.0.0.0 --port 8001 \
+            > backend.log 2>&1 < /dev/null &
+          echo $! > .backend.pid
+
+          nohup npm --prefix frontend run preview -- \
+            --host 0.0.0.0 --port 4173 \
+            > frontend.log 2>&1 < /dev/null &
+          echo $! > .frontend.pid
+
+          sleep 5
+          curl --fail --silent --show-error http://127.0.0.1:8001/api/health
+          curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
