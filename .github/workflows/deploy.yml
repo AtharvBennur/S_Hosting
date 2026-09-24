@@ -93,12 +93,12 @@ jobs:
           stop_process .backend.pid
           stop_process .frontend.pid
 
-          nohup backend/.venv/bin/python -m uvicorn app.main:app \
+          nohup env -u RUNNER_TRACKING_ID backend/.venv/bin/python -m uvicorn app.main:app \
             --app-dir backend --host 0.0.0.0 --port 8001 \
             > backend.log 2>&1 < /dev/null &
           echo $! > .backend.pid
 
-          nohup npm --prefix frontend run preview -- \
+          nohup env -u RUNNER_TRACKING_ID npm --prefix frontend run preview -- \
             --host 0.0.0.0 --port 4173 \
             > frontend.log 2>&1 < /dev/null &
           echo $! > .frontend.pid
