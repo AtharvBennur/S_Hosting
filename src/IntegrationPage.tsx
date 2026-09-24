@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
 import { useLocation } from 'react-router-dom';
-
-const API_BASE = import.meta.env.VITE_API_BASE || '';
+import { API_BASE } from './auth';
 const labels: Record<string, string> = { 
   SANCTIONED_WORKS: 'Sanctioned works', 
   COMPLETED_WORKS: 'Completed works', 

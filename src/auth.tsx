@@ -1,7 +1,25 @@
 import React, { createContext, ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 
-export const API_BASE = import.meta.env.VITE_API_BASE || '';
+export const normalizeApiBase = (base?: string) => {
+  if (!base) return '';
+  const trimmed = base.trim();
+  const cleaned = trimmed.replace(/\/+$/, '');
+  if (
+    cleaned === '0.0.0.0' ||
+    cleaned.startsWith('0.0.0.0:') ||
+    cleaned.includes('://0.0.0.0') ||
+    cleaned === 'http://0.0.0.0' ||
+    cleaned === 'https://0.0.0.0' ||
+    cleaned === 'localhost' ||
+    cleaned.startsWith('localhost:')
+  ) {
+    return '';
+  }
+  return cleaned;
+};
+
+export const API_BASE = normalizeApiBase(import.meta.env.VITE_API_BASE);
 export type Role = 'MINISTRY' | 'STATE_NODAL_AUTHORITY' | 'DISTRICT_AUTHORITY' | 'MEMBER_OF_PARLIAMENT';
 export type User = {
   id: number; name: string; email: string; identity_id: string; role: Role; status: string;

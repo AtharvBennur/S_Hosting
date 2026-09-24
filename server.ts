@@ -32,6 +32,7 @@ interface User {
   scope_id?: string;
   scope_state?: string;
   permissions: string[];
+  password?: string;
 }
 
 interface Project {
@@ -114,6 +115,7 @@ const users: User[] = [
     status: 'ACTIVE',
     scope_type: 'NATIONAL',
     permissions: ['projects:read', 'audit:write', 'dataset:upload', 'analysis:read', 'analysis:manage', 'users:manage', 'audit:integrity', 'security:read', 'security:manage'],
+    password: 'password123',
   },
   {
     id: 2,
@@ -126,6 +128,7 @@ const users: User[] = [
     scope_id: 'Karnataka',
     scope_state: 'Karnataka',
     permissions: ['projects:read', 'audit:write', 'analysis:read', 'users:manage:lower', 'security:read', 'users:manage'],
+    password: 'password123',
   },
   {
     id: 3,
@@ -138,6 +141,7 @@ const users: User[] = [
     scope_id: 'Bengaluru Urban',
     scope_state: 'Karnataka',
     permissions: ['projects:read', 'audit:write', 'analysis:read', 'security:read'],
+    password: 'password123',
   },
   {
     id: 4,
@@ -150,6 +154,7 @@ const users: User[] = [
     scope_id: 'Bengaluru Central',
     scope_state: 'Karnataka',
     permissions: ['projects:read', 'analysis:read'],
+    password: 'password123',
   },
 ];
 
@@ -497,6 +502,9 @@ function authenticate(req: Request, res: Response, next: NextFunction) {
   try {
     const raw = Buffer.from(token, 'base64').toString('utf-8');
     const parsed = JSON.parse(raw);
+    if (parsed.exp && Date.now() > parsed.exp) {
+      return res.status(401).json({ detail: 'Session expired. Please log in again.' });
+    }
     const user = users.find(u => u.id === parsed.id || u.email === parsed.email);
     if (user && user.status === 'ACTIVE') {
       (req as any).user = user;
@@ -510,25 +518,61 @@ function authenticate(req: Request, res: Response, next: NextFunction) {
       return next();
     }
   }
-  // Default to ministry demo if valid token
-  (req as any).user = users[0];
-  next();
+  return res.status(401).json({ detail: 'Invalid or expired session token.' });
 }
 
 // --- API ROUTES ---
 
 // 1. Auth
 app.post('/api/auth/login', (req, res) => {
-  const { login, email, password, role } = req.body;
+  const { login, email, password, role, identity_id } = req.body;
   const identifier = (email || login || '').toLowerCase().trim();
+  const identity = (identity_id || '').toLowerCase().trim();
 
-  // Find user by email or role
-  let user = users.find(u => u.email.toLowerCase() === identifier);
-  if (!user && role) {
-    user = users.find(u => u.role === role);
+  if (!identifier && !identity && !role) {
+    return res.status(400).json({ detail: 'Credentials required.' });
   }
+
+  // Find user by email or identity_id or role if unique
+  let user = users.find(u =>
+    (identifier && u.email.toLowerCase() === identifier) ||
+    (identity && u.identity_id.toLowerCase() === identity)
+  );
+
+  if (!user && role) {
+    if (identifier || identity) {
+      user = users.find(u =>
+        u.role === role &&
+        ((identifier && u.email.toLowerCase() === identifier) ||
+         (identity && u.identity_id.toLowerCase() === identity))
+      );
+    } else {
+      user = users.find(u => u.role === role);
+    }
+  }
+
   if (!user) {
-    user = users[0]; // fallback to Ministry Demo
+    return res.status(401).json({ detail: 'Invalid credentials. User account not found.' });
+  }
+
+  // Validate role if specified
+  if (role && user.role !== role) {
+    return res.status(401).json({ detail: 'Role does not match provisioned account.' });
+  }
+
+  // Validate identity_id if specified
+  if (identity && user.identity_id.toLowerCase() !== identity) {
+    return res.status(401).json({ detail: 'Invalid identity ID for this official account.' });
+  }
+
+  // Validate password
+  const expectedPassword = user.password || 'password123';
+  if (!password || password !== expectedPassword) {
+    return res.status(401).json({ detail: 'Invalid password. Please check your credentials.' });
+  }
+
+  if (user.status !== 'ACTIVE') {
+    return res.status(403).json({ detail: 'Account is pending activation. Please contact the administrator.' });
   }
 
   const tokenPayload = {
@@ -543,7 +587,18 @@ app.post('/api/auth/login', (req, res) => {
     access_token: token,
     token_type: 'bearer',
     expires_in: 1800,
-    user,
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      identity_id: user.identity_id,
+      role: user.role,
+      status: user.status,
+      scope_type: user.scope_type,
+      scope_id: user.scope_id,
+      scope_state: user.scope_state,
+      permissions: user.permissions,
+    },
     demo_environment: true,
   });
 });
@@ -583,6 +638,7 @@ app.post('/api/auth/users', authenticate, (req, res) => {
     scope_id: scope_id || state,
     scope_state: state,
     permissions: ['projects:read', 'analysis:read'],
+    password: temporary_password || 'password123',
   };
   users.push(newUser);
   res.json(newUser);
