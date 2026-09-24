@@ -16,7 +16,7 @@ concurrency:
 jobs:
   deploy:
     name: Build and deploy on EC2
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, app]
     timeout-minutes: 30
 
     env:
