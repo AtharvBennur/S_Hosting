@@ -1,0 +1,7 @@
+{
+  "name": "MPLADS AI Monitoring",
+  "description": "AI-powered audit intelligence platform for MPLADS monitoring",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
