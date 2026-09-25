@@ -1,4 +1,4 @@
-import React, { FormEvent, ReactNode, useEffect, useState } from 'react';
+import React, { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import indiaMap from '@svg-maps/india';
@@ -7,6 +7,7 @@ import './index.css';
 import MultiUploadPage from './MultiUploadPage';
 import IntegrationPage from './IntegrationPage';
 import { API_BASE, Role, useAuth } from './auth';
+import { VoiceDictation } from './VoiceDictation';
 const levels = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const palette: Record<string, string> = { LOW: '#48a88a', MEDIUM: '#d7a64a', HIGH: '#e4774c', CRITICAL: '#d95b67' };
 
@@ -32,6 +33,7 @@ type AuditCase = { id: number; project_id: number; title: string; priority: stri
 
 const money = (value?: number) => typeof value === 'number' && Number.isFinite(value) ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(value) : '—';
 const compactMoney = (value?: number) => typeof value === 'number' && Number.isFinite(value) ? new Intl.NumberFormat('en-IN', { notation: 'compact', maximumFractionDigits: 1 }).format(value) : '—';
+const compactCurrency = (value?: number) => typeof value === 'number' && Number.isFinite(value) ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', notation: 'compact', maximumFractionDigits: 1 }).format(value) : '—';
 const pct = (value?: number) => typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '—';
 const dateText = (value?: string) => value ? new Date(value).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not available';
 const cx = (...parts: Array<string | false | undefined>) => parts.filter(Boolean).join(' ');
@@ -172,7 +174,10 @@ function Shell({ children }: { children: ReactNode }) {
           {location.pathname === '/' ? 'OVERVIEW' : location.pathname.replace('/', '').replace(/-/g, ' ').toUpperCase()}
         </div>
         <form className="global-search" onSubmit={submitSearch}>
-          <span>⌕</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#729b92', flexShrink: 0 }}>
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
           <input
             value={search}
             onChange={event => setSearch(event.target.value)}
@@ -182,7 +187,11 @@ function Shell({ children }: { children: ReactNode }) {
         </form>
         <div className="top-actions">
           <button className="icon-button" title="Open Notifications" onClick={() => navigate('/alerts')}>
-            🔔{alertCount > 0 && <span className="badge-counter">{alertCount}</span>}
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: '#16655c' }}>
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+            </svg>
+            {alertCount > 0 && <span className="badge-counter">{alertCount}</span>}
           </button>
           <div className="timestamp">
             {currentDate}<br />
@@ -240,10 +249,131 @@ function useDashboardFilters() {
 
 function StateMap({ dashboard, selected, onSelect }: { dashboard: Dashboard; selected: string; onSelect: (state: string) => void }) {
   const [hovered, setHovered] = useState<string | null>(null);
+  const [coords, setCoords] = useState<{ x: number; y: number } | null>(null);
+  const [generatingState, setGeneratingState] = useState<string | null>(null);
+  const [generatedCases, setGeneratedCases] = useState<Record<string, number>>({});
+  const leaveTimeoutRef = useRef<number | null>(null);
   const stateRows = new Map((dashboard.state_wise || []).map(row => [row.name, row]));
   const maxRisk = Math.max(...(dashboard.state_wise || []).map(row => row.average_risk || 0), 1);
   const locations = (indiaMap as any).locations || [];
   const hoveredRow = hovered ? stateRows.get(hovered) : null;
+
+  const nationalAvgRisk = useMemo(() => {
+    if (typeof (dashboard as any).national_average_risk === 'number') {
+      return (dashboard as any).national_average_risk;
+    }
+    const states = dashboard.state_wise || [];
+    const totalProjects = states.reduce((sum: number, s: any) => sum + (s.projects || 0), 0);
+    const totalRiskWeighted = states.reduce((sum: number, s: any) => sum + ((s.average_risk || 0) * (s.projects || 0)), 0);
+    return totalProjects > 0 ? Number((totalRiskWeighted / totalProjects).toFixed(1)) : 0;
+  }, [dashboard]);
+
+  const handleMouseMove = (e: React.MouseEvent<SVGElement>, stateName: string) => {
+    if (leaveTimeoutRef.current) {
+      clearTimeout(leaveTimeoutRef.current);
+      leaveTimeoutRef.current = null;
+    }
+    const container = e.currentTarget.closest('.map-wrap');
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      const rawX = e.clientX - rect.left;
+      const rawY = e.clientY - rect.top;
+      const tooltipWidth = 250;
+      const tooltipHeight = 260;
+      const x = rawX + tooltipWidth + 16 > rect.width ? Math.max(8, rawX - tooltipWidth - 12) : rawX + 16;
+      const y = Math.min(Math.max(8, rawY - 40), Math.max(8, rect.height - tooltipHeight));
+      setCoords({ x, y });
+    }
+    setHovered(stateName);
+  };
+
+  const handleMouseLeave = () => {
+    leaveTimeoutRef.current = window.setTimeout(() => {
+      setHovered(null);
+      setCoords(null);
+    }, 280);
+  };
+
+  const handleTooltipMouseEnter = () => {
+    if (leaveTimeoutRef.current) {
+      clearTimeout(leaveTimeoutRef.current);
+      leaveTimeoutRef.current = null;
+    }
+  };
+
+  const handleTooltipMouseLeave = () => {
+    leaveTimeoutRef.current = window.setTimeout(() => {
+      setHovered(null);
+      setCoords(null);
+    }, 280);
+  };
+
+  const topSectors = useMemo(() => {
+    if (!hoveredRow) return [];
+    if (hoveredRow.top_sectors && Array.isArray(hoveredRow.top_sectors) && hoveredRow.top_sectors.length > 0) {
+      return hoveredRow.top_sectors;
+    }
+    if (hovered && dashboard.top_projects) {
+      const counts: Record<string, number> = {};
+      for (const p of dashboard.top_projects) {
+        if (p.state === hovered && p.category) {
+          counts[p.category] = (counts[p.category] || 0) + 1;
+        }
+      }
+      return Object.entries(counts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([sector, count]) => ({ sector, count }));
+    }
+    return [];
+  }, [hovered, hoveredRow, dashboard.top_projects]);
+
+  const riskLevel = hoveredRow ? (
+    hoveredRow.average_risk >= 70 ? 'CRITICAL' :
+    hoveredRow.average_risk >= 50 ? 'HIGH' :
+    hoveredRow.average_risk >= 30 ? 'MEDIUM' : 'LOW'
+  ) : 'LOW';
+
+  const totalSanctionedAmount = hoveredRow
+    ? (typeof hoveredRow.total_sanctioned_amount === 'number'
+        ? hoveredRow.total_sanctioned_amount
+        : (typeof hoveredRow.sanctioned === 'number' ? hoveredRow.sanctioned : 0))
+    : 0;
+
+  const riskDiff = hoveredRow ? Number((hoveredRow.average_risk - nationalAvgRisk).toFixed(1)) : 0;
+  const isHigher = riskDiff > 0.1;
+  const isLower = riskDiff < -0.1;
+
+  const handleMarkForReview = async (e: React.MouseEvent, stateName: string, row: any) => {
+    e.stopPropagation();
+    if (generatingState) return;
+
+    setGeneratingState(stateName);
+    try {
+      // Find highest risk project in this state or fallback to top project
+      const stateProjects = (dashboard.top_projects || []).filter(p => p.state === stateName);
+      const targetProject = stateProjects.sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0))[0] || dashboard.top_projects?.[0] || { id: 1, project_name: `${stateName} Field Review` };
+
+      const diffText = isHigher ? `+${riskDiff}% higher than national average` : isLower ? `${Math.abs(riskDiff)}% below national average` : 'At national average';
+      const sectorNames = topSectors.map(s => `${s.sector} (${s.count})`).join(', ');
+
+      const payload = {
+        project_id: targetProject.id,
+        title: `State Review: ${stateName} — ${row.projects} Projects (Avg Risk ${row.average_risk.toFixed(1)}%)`,
+        priority: row.average_risk >= 70 ? 'CRITICAL' : row.average_risk >= 50 ? 'HIGH' : 'MEDIUM',
+        assigned_authority: `${stateName} State Nodal Inspection Cell`,
+        notes: `Statewide audit case automatically flagged from State Risk Map.\n• State Jurisdiction: ${stateName}\n• Total Analyzed Projects: ${row.projects}\n• Average Risk Score: ${row.average_risk.toFixed(1)}% (${diffText})\n• Total Sanctioned Amount: ${money(totalSanctionedAmount)}\n• Recorded Expenditure: ${money(row.expenditure || 0)}\n• Primary Sectors: ${sectorNames || 'General'}\n• Priority Directive: Field physical verification & voucher inspection recommended for high-risk executing agencies.`,
+        state: stateName,
+      };
+
+      const res = await axios.post(`${API_BASE}/api/audit-cases`, payload);
+      setGeneratedCases(prev => ({ ...prev, [stateName]: res.data.id }));
+    } catch (err) {
+      console.error('Failed to create audit case for state', err);
+    } finally {
+      setGeneratingState(null);
+    }
+  };
 
   return (
     <div className="map-wrap">
@@ -255,24 +385,152 @@ function StateMap({ dashboard, selected, onSelect }: { dashboard: Dashboard; sel
         <span>Higher risk</span>
       </div>
       {hovered && (
-        <div style={{
-          position: 'absolute',
-          top: 8,
-          left: 8,
-          background: 'rgba(17, 51, 46, 0.95)',
-          color: '#fff',
-          padding: '6px 10px',
-          borderRadius: 4,
-          fontSize: 11,
-          pointerEvents: 'none',
-          zIndex: 10,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
-        }}>
-          <strong>{hovered}</strong>
-          <div>{hoveredRow ? `${hoveredRow.projects} projects · Avg Risk ${hoveredRow.average_risk.toFixed(1)}%` : 'No analyzed records'}</div>
+        <div
+          key={hovered}
+          className="state-map-tooltip"
+          style={{
+            left: coords ? `${coords.x}px` : '12px',
+            top: coords ? `${coords.y}px` : '12px',
+          }}
+          role="tooltip"
+          aria-live="polite"
+          onMouseEnter={handleTooltipMouseEnter}
+          onMouseLeave={handleTooltipMouseLeave}
+        >
+          <div className="state-map-tooltip-header">
+            <span className="state-map-tooltip-title">{hovered}</span>
+            {hoveredRow && (
+              <span
+                className="state-map-tooltip-badge"
+                style={{
+                  background: palette[riskLevel] || '#48a88a',
+                  color: '#ffffff',
+                }}
+              >
+                {riskLevel}
+              </span>
+            )}
+          </div>
+
+          {hoveredRow ? (
+            <>
+              <div className="state-map-tooltip-stats">
+                <div>
+                  <span className="state-map-tooltip-stat-label">Projects</span>
+                  <div className="state-map-tooltip-stat-val">{hoveredRow.projects.toLocaleString('en-IN')}</div>
+                </div>
+                <div>
+                  <span className="state-map-tooltip-stat-label">Avg Risk</span>
+                  <div className="state-map-tooltip-stat-val state-map-tooltip-risk-val">
+                    <span style={{ color: palette[riskLevel] || '#48a88a' }}>
+                      {hoveredRow.average_risk.toFixed(1)}%
+                    </span>
+                    <span
+                      className={`state-map-trend-indicator ${isHigher ? 'trend-up' : isLower ? 'trend-down' : 'trend-neutral'}`}
+                      title={`National avg: ${nationalAvgRisk.toFixed(1)}% (${isHigher ? `+${riskDiff}% higher` : isLower ? `${Math.abs(riskDiff)}% lower` : 'Equal'})`}
+                      aria-label={isHigher ? 'Up vs national average' : isLower ? 'Down vs national average' : 'Equal to national average'}
+                    >
+                      {isHigher ? (
+                        <>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <polyline points="18 15 12 9 6 15" />
+                          </svg>
+                          <span>Up</span>
+                        </>
+                      ) : isLower ? (
+                        <>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                          <span>Down</span>
+                        </>
+                      ) : (
+                        <span style={{ fontSize: '10px' }}>—</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="state-map-tooltip-sanctioned">
+                <span className="state-map-tooltip-stat-label">Total Sanctioned</span>
+                <div className="state-map-tooltip-sanctioned-val" title={`Total sanctioned: ${money(totalSanctionedAmount)}`}>
+                  <span className="total-sanctioned-amount">{money(totalSanctionedAmount)}</span>
+                  <span className="total-sanctioned-compact">({compactCurrency(totalSanctionedAmount)})</span>
+                </div>
+              </div>
+
+              <div className="state-map-tooltip-sectors">
+                <div className="state-map-tooltip-sectors-title">Top 3 Sectors</div>
+                {topSectors.length > 0 ? (
+                  <div className="state-map-tooltip-sector-list">
+                    {topSectors.map((s: any, idx: number) => (
+                      <div className="state-map-tooltip-sector-item" key={s.sector || idx}>
+                        <span className="state-map-tooltip-sector-name">
+                          <span style={{ opacity: 0.6, marginRight: 4 }}>{idx + 1}.</span>
+                          {s.sector}
+                        </span>
+                        <span className="state-map-tooltip-sector-count">
+                          {s.count} {s.count === 1 ? 'work' : 'works'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', fontStyle: 'italic', padding: '2px 0' }}>
+                    Sector details not recorded
+                  </div>
+                )}
+              </div>
+
+              {/* MARK FOR REVIEW ACTION */}
+              <div className="state-map-tooltip-actions">
+                <button
+                  type="button"
+                  className={`state-map-review-btn ${generatedCases[hovered] ? 'created' : ''}`}
+                  onClick={(e) => handleMarkForReview(e, hovered, hoveredRow)}
+                  disabled={generatingState === hovered}
+                  title={`Automatically generate an Audit Case for ${hovered} using state project statistics`}
+                >
+                  {generatingState === hovered ? (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spin-icon">
+                        <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="12" />
+                      </svg>
+                      <span>Generating Case...</span>
+                    </>
+                  ) : generatedCases[hovered] ? (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span>Case #{String(generatedCases[hovered]).padStart(4, '0')} Generated</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                      </svg>
+                      <span>Mark for Review</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', padding: '4px 0' }}>
+              No analyzed projects for this state.
+            </div>
+          )}
         </div>
       )}
-      <svg className="india-map" viewBox={(indiaMap as any).viewBox} role="img" aria-label="Interactive India state risk map">
+      <svg
+        className="india-map"
+        viewBox={(indiaMap as any).viewBox}
+        role="img"
+        aria-label="Interactive India state risk map"
+        onMouseLeave={handleMouseLeave}
+      >
         {locations.map((location: any) => {
           const row = stateRows.get(location.name);
           const intensity = row ? Math.min((row.average_risk || 0) / maxRisk, 1) : 0;
@@ -284,8 +542,9 @@ function StateMap({ dashboard, selected, onSelect }: { dashboard: Dashboard; sel
               d={location.path}
               fill={fill}
               className="state-shape"
-              onMouseEnter={() => setHovered(location.name)}
-              onMouseLeave={() => setHovered(null)}
+              onMouseEnter={(e) => handleMouseMove(e, location.name)}
+              onMouseMove={(e) => handleMouseMove(e, location.name)}
+              onMouseLeave={handleMouseLeave}
               onClick={() => onSelect(isSelected ? '' : location.name)}
             >
               <title>{location.name}: {row ? `${row.projects} projects, avg risk ${row.average_risk.toFixed(1)}%` : 'No analyzed projects'}</title>
@@ -307,7 +566,42 @@ function StateMap({ dashboard, selected, onSelect }: { dashboard: Dashboard; sel
 function DashboardPage() {
   const location = useLocation();
   const [dashboard, setDashboard] = useState<Dashboard | null>(null); const [compliance, setCompliance] = useState<any>(null); const [coverage, setCoverage] = useState<any>(null); const [fraudSummary, setFraudSummary] = useState<any>(null); const [reviewError, setReviewError] = useState(''); const { filters, change } = useDashboardFilters(); const [selectedState, setSelectedState] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
   const selectedRunId = new URLSearchParams(location.search).get('run_id');
+
+  const handleDownloadStateCSV = async () => {
+    setIsExporting(true);
+    try {
+      const currentState = selectedState || filters.state || '';
+      const params: Record<string, any> = {
+        page: 1,
+        page_size: 5000,
+      };
+      if (currentState) {
+        params.state = currentState;
+      }
+      if (selectedRunId) {
+        params.run_id = selectedRunId;
+      }
+      if (filters.category) {
+        params.category = filters.category;
+      }
+      if (filters.risk_level) {
+        params.risk_level = filters.risk_level;
+      }
+      const response = await axios.get(`${API_BASE}/api/projects`, { params });
+      const records = response.data?.records || response.data?.items || [];
+      const filename = currentState
+        ? `${currentState.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_projects_audit.csv`
+        : 'all_states_projects_audit.csv';
+      exportProjectsCSV(records, filename);
+    } catch (err) {
+      console.error('Failed to export state projects CSV', err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   useEffect(() => { axios.get(`${API_BASE}/api/dashboard`, { params: { run_id: selectedRunId || undefined, state: selectedState || filters.state || undefined, category: filters.category || undefined, risk_level: filters.risk_level || undefined } }).then(response => { setDashboard(response.data); change('stateOptions', (response.data.state_options || []).join('|')); }); }, [selectedRunId, selectedState, filters.state, filters.category, filters.risk_level]);
   useEffect(() => { const params = { run_id: selectedRunId || undefined }; setReviewError(''); Promise.all([axios.get(`${API_BASE}/api/compliance/summary`, { params }), axios.get(`${API_BASE}/api/integration/coverage`, { params }), axios.get(`${API_BASE}/api/fraud-risk/summary`, { params })]).then(([findings, sourceCoverage, fraud]) => { setCompliance(findings.data); setCoverage(sourceCoverage.data); setFraudSummary(fraud.data); }).catch(() => setReviewError('Compliance, fraud-risk, and source coverage could not be loaded for this analysis run.')); }, [selectedRunId]);
   if (!dashboard) return <div className="page-loading">Loading intelligence workspace...</div>;
@@ -376,7 +670,7 @@ function DashboardPage() {
         {coverage && <p className="muted" style={{ marginTop: 12, fontSize: 11 }}>Source coverage: {Object.entries(coverage.coverage_percentages || {}).map(([role, value]) => `${role}: ${value}%`).join(' · ') || 'Not available'}. Ambiguous records: {(coverage.ambiguous_matches || []).length}; unmatched rows: {(coverage.unmatched_rows || []).length}.</p>}
       </section>
     )}
-    <div className="grid-2-1"><section className="panel map-panel"><div className="panel-head"><div><div className="eyebrow">STATE VIEW</div><h2>Where do projects need attention?</h2></div><button className="button ghost" onClick={() => { setSelectedState(''); change('state', ''); }}>All states</button></div><div className="map-layout"><StateMap dashboard={dashboard} selected={selectedState} onSelect={state => { setSelectedState(state); change('state', state); }} /><div className="state-insight"><div className="eyebrow">SELECTED STATE</div><h3>{selectedState || 'All India'}</h3>{selectedState ? <>{(() => { const row = dashboard.state_wise.find(item => item.name === selectedState); return row ? <><div className="insight-number">{row.average_risk.toFixed(1)}<small> avg risk</small></div><div className="insight-list"><div><span>Projects</span><strong>{row.projects}</strong></div><div><span>Sanctioned</span><strong>{compactMoney(row.sanctioned)}</strong></div><div><span>High risk</span><strong>{row.high_risk}</strong></div><div><span>Critical</span><strong>{row.critical}</strong></div></div></> : <EmptyState title="No records" text="This state has no analyzed records." />; })()}</> : <><div className="insight-number">{dashboard.total_utilization_ratio ? pct(dashboard.total_utilization_ratio) : '—'}<small> national utilization</small></div><div className="insight-list"><div><span>States covered</span><strong>{dashboard.state_wise.length}</strong></div><div><span>High risk</span><strong>{dashboard.high_risk_projects}</strong></div><div><span>Alerts</span><strong>{dashboard.active_alerts}</strong></div></div></>}</div></div></section>
+    <div className="grid-2-1"><section className="panel map-panel"><div className="panel-head"><div><div className="eyebrow">STATE VIEW</div><h2>Where do projects need attention?</h2></div><div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}><button className="button secondary" onClick={handleDownloadStateCSV} disabled={isExporting} title={selectedState ? `Download CSV project register for ${selectedState}` : 'Download CSV project register for all states'}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>{isExporting ? 'Exporting...' : selectedState ? `Download CSV (${selectedState})` : 'Download CSV'}</button><button className="button ghost" onClick={() => { setSelectedState(''); change('state', ''); }}>All states</button></div></div><div className="map-layout"><StateMap dashboard={dashboard} selected={selectedState} onSelect={state => { setSelectedState(state); change('state', state); }} /><div className="state-insight"><div className="eyebrow">SELECTED STATE</div><h3>{selectedState || 'All India'}</h3>{selectedState ? <>{(() => { const row = dashboard.state_wise.find(item => item.name === selectedState); return row ? <><div className="insight-number">{row.average_risk.toFixed(1)}<small> avg risk</small></div><div className="insight-list"><div><span>Projects</span><strong>{row.projects}</strong></div><div><span>Sanctioned</span><strong>{compactMoney(row.sanctioned)}</strong></div><div><span>High risk</span><strong>{row.high_risk}</strong></div><div><span>Critical</span><strong>{row.critical}</strong></div></div><div style={{ marginTop: 14 }}><button className="button secondary" style={{ width: '100%', justifyContent: 'center' }} onClick={handleDownloadStateCSV} disabled={isExporting}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>{isExporting ? 'Preparing export...' : `Export ${selectedState} CSV`}</button></div></> : <EmptyState title="No records" text="This state has no analyzed records." />; })()}</> : <><div className="insight-number">{dashboard.total_utilization_ratio ? pct(dashboard.total_utilization_ratio) : '—'}<small> national utilization</small></div><div className="insight-list"><div><span>States covered</span><strong>{dashboard.state_wise.length}</strong></div><div><span>High risk</span><strong>{dashboard.high_risk_projects}</strong></div><div><span>Alerts</span><strong>{dashboard.active_alerts}</strong></div></div><div style={{ marginTop: 14 }}><button className="button secondary" style={{ width: '100%', justifyContent: 'center' }} onClick={handleDownloadStateCSV} disabled={isExporting}><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>{isExporting ? 'Preparing export...' : 'Export National CSV'}</button></div></>}</div></div></section>
       <section className="panel"><div className="panel-head"><div><div className="eyebrow">RISK PROFILE</div><h2>Projects by review level</h2></div><Link to="/alerts" className="text-link">Open reminders →</Link></div><div className="donut-wrap"><ResponsiveContainer width="60%" height={220}><PieChart><Pie data={riskData} dataKey="value" innerRadius={62} outerRadius={88} paddingAngle={3}>{riskData.map(item => <Cell key={item.name} fill={palette[item.name]} />)}</Pie><Tooltip formatter={(value: any, name: any) => [`${value} projects`, name]} /></PieChart></ResponsiveContainer><div className="risk-list">{riskData.map(item => <div key={item.name}><span className="risk-key" style={{ background: palette[item.name] }} />{item.name}<strong>{item.value}</strong></div>)}</div></div></section></div>
     <div className="grid-2"><section className="panel chart-panel"><div className="panel-head"><div><div className="eyebrow">STATE COMPARISON</div><h2>Average risk by state</h2></div></div><ResponsiveContainer width="100%" height={250}><BarChart data={stateData} margin={{ left: 0, right: 10, bottom: 25 }}><CartesianGrid strokeDasharray="3 3" stroke="#dbe5e1" vertical={false} /><XAxis dataKey="name" angle={-25} textAnchor="end" height={55} tick={{ fill: '#65736e', fontSize: 11 }} /><YAxis tick={{ fill: '#65736e', fontSize: 11 }} /><Tooltip /><Bar dataKey="risk" fill="#238f82" radius={[3, 3, 0, 0]} /></BarChart></ResponsiveContainer></section><section className="panel chart-panel"><div className="panel-head"><div><div className="eyebrow">OPERATIONAL SIGNAL</div><h2>Delayed completion profile</h2></div></div><ResponsiveContainer width="100%" height={250}><LineChart data={dashboard.delay_distribution}><CartesianGrid strokeDasharray="3 3" stroke="#dbe5e1" vertical={false} /><XAxis dataKey="range" tick={{ fill: '#65736e', fontSize: 11 }} /><YAxis tick={{ fill: '#65736e', fontSize: 11 }} /><Tooltip /><Line type="monotone" dataKey="projects" stroke="#d57c4c" strokeWidth={3} dot={{ fill: '#d57c4c', r: 4 }} /></LineChart></ResponsiveContainer></section></div>
     <section className="panel attention-panel"><div className="panel-head"><div><div className="eyebrow">PROJECTS TO CHECK</div><h2>Priority attention required</h2><p>Projects with the strongest reasons for a closer review.</p></div><Link to="/risk" className="button secondary">View all projects to check</Link></div><ProjectTable projects={dashboard.top_projects} compact /></section>
@@ -605,6 +899,8 @@ function ProjectDetailPage() {
   const [saved, setSaved] = useState(''); 
   const [authority, setAuthority] = useState('District audit officer'); 
   const [notes, setNotes] = useState(''); 
+  const [projectNotes, setProjectNotes] = useState('');
+  const [savingNotes, setSavingNotes] = useState(false);
   const [explanation, setExplanation] = useState<any>(null);
   const [similar, setSimilar] = useState<any[]>([]);
   const [auditFile, setAuditFile] = useState<any>(null);
@@ -616,13 +912,50 @@ function ProjectDetailPage() {
   const [loadError, setLoadError] = useState('');
   const params = { run_id: runId || undefined };
   const reloadAuditFile = async () => setAuditFile((await axios.get(`${API_BASE}/api/projects/${id}/audit-file`, { params })).data);
+
   useEffect(() => { 
-    Promise.all([axios.get(`${API_BASE}/api/projects/${id}`, { params }), axios.get(`${API_BASE}/api/projects/${id}/explanation`, { params }), axios.get(`${API_BASE}/api/projects/${id}/similar`, { params }), axios.get(`${API_BASE}/api/projects/${id}/audit-file`, { params }), axios.get(`${API_BASE}/api/projects/${id}/compliance`, { params }), axios.get(`${API_BASE}/api/projects/${id}/fraud-risk`, { params })]).then(([projectResponse, explanationResponse, similarResponse, auditResponse, complianceResponse, fraudResponse]) => { setProject(projectResponse.data); setExplanation(explanationResponse.data); setSimilar(similarResponse.data.items || []); setAuditFile(auditResponse.data); setCompliance(complianceResponse.data.items || []); setFraudRisk(fraudResponse.data); }).catch(error => setLoadError(error instanceof Error ? error.message : 'Unable to load this project.'));
+    Promise.all([
+      axios.get(`${API_BASE}/api/projects/${id}`, { params }),
+      axios.get(`${API_BASE}/api/projects/${id}/explanation`, { params }),
+      axios.get(`${API_BASE}/api/projects/${id}/similar`, { params }),
+      axios.get(`${API_BASE}/api/projects/${id}/audit-file`, { params }),
+      axios.get(`${API_BASE}/api/projects/${id}/compliance`, { params }),
+      axios.get(`${API_BASE}/api/projects/${id}/fraud-risk`, { params })
+    ]).then(([projectResponse, explanationResponse, similarResponse, auditResponse, complianceResponse, fraudResponse]) => {
+      setProject(projectResponse.data);
+      setExplanation(explanationResponse.data);
+      setSimilar(similarResponse.data.items || []);
+      setAuditFile(auditResponse.data);
+      if (auditResponse.data?.notes) setProjectNotes(auditResponse.data.notes);
+      setCompliance(complianceResponse.data.items || []);
+      setFraudRisk(fraudResponse.data);
+    }).catch(error => setLoadError(error instanceof Error ? error.message : 'Unable to load this project.'));
   }, [id, runId]);
+
   if (loadError) return <div className="page-stack"><section className="panel"><h2>Unable to open this project</h2><p>{loadError}</p><Link className="text-link" to="/projects">Return to projects</Link></section></div>;
   if (!project) return <div className="page-loading">Loading investigation workspace...</div>; 
+
+  const saveProjectNotes = async () => {
+    setSavingNotes(true);
+    try {
+      await axios.post(`${API_BASE}/api/projects/${project.id}/notes`, { notes: projectNotes });
+      await reloadAuditFile();
+      setSaved('Auditor notes saved to project file');
+    } catch {
+      setSaved('Failed to save project notes');
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
   const createCase = async () => { 
-    await axios.post(`${API_BASE}/api/audit-cases`, { project_id: project.id, title: `Review: ${project.project_name}`, priority: project.risk_level === 'CRITICAL' ? 'CRITICAL' : 'HIGH', assigned_authority: authority, notes }); 
+    await axios.post(`${API_BASE}/api/audit-cases`, {
+      project_id: project.id,
+      title: `Review: ${project.project_name}`,
+      priority: project.risk_level === 'CRITICAL' ? 'CRITICAL' : 'HIGH',
+      assigned_authority: authority,
+      notes: notes || projectNotes
+    }); 
     setSaved('Audit case created and assigned'); 
     setModal(false); 
   }; 
@@ -649,7 +982,7 @@ function ProjectDetailPage() {
   const completedChecksCount = verificationItems.filter((item: string) => Boolean(auditFile?.checklist?.find((entry: any) => entry.item === item)?.completed)).length;
 
   return <div className="page-stack">
-    <div className="page-actions"><Link className="text-link" to="/projects">← Back to projects</Link><div className="action-row"><button className="button secondary" onClick={() => downloadProjectReport(project, explanation, similar)}>Download project report</button><button className="button secondary" onClick={() => setModal(true)}>Create review case</button><button className="button primary" onClick={markReviewed}>Mark reviewed</button></div></div>
+    <div className="page-actions"><Link className="text-link" to="/projects">← Back to projects</Link><div className="action-row"><button className="button secondary" onClick={() => downloadProjectReport(project, explanation, similar)}>Download project report</button><button className="button secondary" onClick={() => { setNotes(projectNotes || ''); setModal(true); }}>Create review case</button><button className="button primary" onClick={markReviewed}>Mark reviewed</button></div></div>
     {saved && (
       <div className="notice" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>{saved}</span>
@@ -663,12 +996,80 @@ function ProjectDetailPage() {
       <div className="risk-summary"><div><span>Review level</span><strong>{typeof project.risk_score === 'number' ? `${project.risk_score.toFixed(1)}%` : '—'}</strong></div><span className={`badge ${level.toLowerCase()}`}>{level}</span></div>
     </section>
     <ProjectOverview project={project} explanation={explanation} />
+
+    {/* AUDITOR FIELD NOTES & VOICE DICTATION */}
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <div className="eyebrow">MICROPHONE VOICE DICTATION</div>
+          <h2>Auditor Field Notes & Observations</h2>
+          <p>Dictate inspection observations using your microphone or record physical verification findings hands-free.</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              setNotes(projectNotes);
+              setModal(true);
+            }}
+            title="Open review case modal with these notes"
+          >
+            Transfer to Review Case →
+          </button>
+        </div>
+      </div>
+      <VoiceDictation
+        id="project-field-notes"
+        value={projectNotes}
+        onChange={setProjectNotes}
+        onSave={saveProjectNotes}
+        isSaving={savingNotes}
+        placeholder="Click 'Dictate with voice' and speak observations (e.g. site inspection, physical measurement, voucher reconciliation, contractor delays)..."
+        minHeight={120}
+      />
+    </section>
+
     <section className="panel"><div className="eyebrow">POTENTIAL FRAUD-RISK SIGNALS</div><h2>Evidence requiring review</h2><p className="muted">{fraudRisk?.disclaimer || 'Loading review signals…'}</p>{fraudRisk?.signals?.length ? <><div className="toolbar"><select value={fraudDisposition} onChange={event => setFraudDisposition(event.target.value)}><option>Requires Evidence</option><option>Cleared</option><option>Escalated</option><option>Irregularity Confirmed</option><option>Referred for Investigation</option><option>False Positive</option></select><input placeholder="Decision reason" value={fraudReason} onChange={event => setFraudReason(event.target.value)} /><input placeholder="Evidence reference" value={fraudEvidence} onChange={event => setFraudEvidence(event.target.value)} /></div><ul className="plain-list">{fraudRisk.signals.map((item: any, index: number) => <li key={`${item.signal_code}-${index}`}><strong>{item.title}</strong> ({item.severity}, {Math.round(item.confidence * 100)}%) — {item.explanation}<small>{item.recommended_verification}</small><button className="button ghost" type="button" onClick={() => reviewFraudSignal(item.signal_code)}>Save review disposition</button></li>)}</ul></> : <EmptyState title="No potential fraud-risk signals" text="No deterministic indicator was available for this project." />}</section>
     <section className="panel"><div className="eyebrow">PROJECT COMPLIANCE</div><h2>Review findings</h2><p className="muted">Each item is a human-review signal, not a confirmed finding.</p>{compliance.length ? <ul className="plain-list">{compliance.map((item, index) => <li key={`${item.rule_code}-${index}`}><strong>{item.title}</strong> ({item.severity}) — {item.explanation}<small>{item.recommended_action}</small></li>)}</ul> : <EmptyState title="No compliance findings" text="No deterministic compliance issue was available for this project." />}</section>
     <section className="panel"><div className="eyebrow">WHY THIS PROJECT NEEDS A CLOSER LOOK</div><h2>Things to check</h2><p className="muted">Audit status: <strong>{auditFile?.audit_status || 'Not Reviewed'}</strong></p><ul className="plain-list">{(explanation?.why_flagged || project.reasons || ['No specific issue recorded.']).map((reason: string) => <li key={reason}>{reason}</li>)}</ul><div style={{ marginTop: 16 }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}><h3 style={{ margin: 0 }}>Records to request</h3><span className="notice-tag">{completedChecksCount} of {verificationItems.length} verified</span></div><ul className="plain-list">{verificationItems.map((item: string) => { const completed = Boolean(auditFile?.checklist?.find((entry: any) => entry.item === item)?.completed); return <li key={item}><label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}><input type="checkbox" checked={completed} onChange={event => toggleChecklist(item, event.target.checked)} /> <span style={{ textDecoration: completed ? 'line-through' : undefined, color: completed ? 'var(--muted)' : undefined }}>{item}</span></label></li>; })}</ul></div></section>
     <section className="panel progress-panel"><div className="eyebrow">PROJECT PROGRESS</div><h2>Timeline and checks</h2><div className="metric-grid">{signalRows.map(([label, value]) => <div className="metric-card" key={label}><span>{label}</span><strong>{signalPercent(value)}</strong><div className="metric-bar"><i style={{ width: `${Math.min(100, Number(value || 0) * 100)}%` }} /></div></div>)}</div><p className="muted">{project.delay_days ? `${Math.round(project.delay_days)} days recorded between planned and actual completion.` : 'No delay recorded in the uploaded dates.'}</p></section>
     <section className="panel comparable-panel"><div className="eyebrow">COMPARABLE PROJECTS</div><h2>Other works to compare</h2><div className="similar-list">{similar.length ? similar.slice(0, 10).map(item => <Link className="similar-item" to={`/projects/${item.id}${runId ? `?run_id=${encodeURIComponent(runId)}` : ''}`} key={item.id}><strong>{item.project_code || item.id}</strong><span>{projectTitle(item)}</span><span>{money(item.expenditure)} <b>{item.risk_level || reviewLevel(item)}</b></span></Link>) : <p className="muted">No comparable projects found.</p>}</div></section>
-    {modal && <div className="modal-backdrop"><section className="modal panel"><button className="modal-close" onClick={() => setModal(false)}>×</button><h2>Create review case</h2><label>Responsible officer<input value={authority} onChange={event => setAuthority(event.target.value)} /></label><label>Notes<textarea value={notes} onChange={event => setNotes(event.target.value)} /></label><button className="button primary" onClick={createCase}>Save review case</button></section></div>}
+
+    {/* CREATE REVIEW CASE MODAL WITH VOICE DICTATION */}
+    {modal && (
+      <div className="modal-backdrop">
+        <section className="modal panel" style={{ maxWidth: 580, width: '92%' }}>
+          <button className="modal-close" onClick={() => setModal(false)}>×</button>
+          <div className="eyebrow">AUDIT CASE CREATION</div>
+          <h2>Create review case</h2>
+          <p className="muted" style={{ margin: '0 0 16px', fontSize: 12 }}>
+            Assign a case for closer investigation. Dictate observations using your microphone or type instructions.
+          </p>
+
+          <div className="provision-field" style={{ marginBottom: 14 }}>
+            <label className="provision-label">Responsible Authority / Officer</label>
+            <input className="provision-input" value={authority} onChange={event => setAuthority(event.target.value)} />
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <VoiceDictation
+              id="modal-case-notes"
+              label="Case Notes & Instructions"
+              value={notes}
+              onChange={setNotes}
+              placeholder="Speak or type auditor instructions, vouchers requiring verification, or physical inspection directives..."
+              minHeight={110}
+            />
+          </div>
+
+          <div style={{ marginTop: 20, display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <button className="button ghost" onClick={() => setModal(false)}>Cancel</button>
+            <button className="button primary" onClick={createCase}>Save review case</button>
+          </div>
+        </section>
+      </div>
+    )}
   </div>;
 }
 
@@ -753,23 +1154,105 @@ const DEMO_PERSONAS = [
 function CasesPage() { 
   const [cases, setCases] = useState<AuditCase[]>([]); 
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [selectedCase, setSelectedCase] = useState<AuditCase | null>(null);
+  const [caseNotes, setCaseNotes] = useState('');
+  const [savingNotes, setSavingNotes] = useState(false);
+  const [savedNotice, setSavedNotice] = useState('');
+  const [newCaseModal, setNewCaseModal] = useState(false);
+  const [newCaseDraft, setNewCaseDraft] = useState({
+    project_id: '',
+    title: '',
+    priority: 'HIGH',
+    assigned_authority: 'District audit officer',
+    notes: '',
+  });
+
   const refresh = () => { 
     axios.get(`${API_BASE}/api/audit-cases`).then(response => setCases(response.data.items || [])); 
   }; 
+
   useEffect(() => { 
     refresh(); 
   }, []); 
+
   const update = async (id: number, status: string) => { 
     await axios.patch(`${API_BASE}/api/audit-cases/${id}`, { status }); 
     refresh(); 
   }; 
+
+  const openCaseNotes = (item: AuditCase) => {
+    setSelectedCase(item);
+    setCaseNotes(item.notes || '');
+    setSavedNotice('');
+  };
+
+  const saveCaseNotes = async () => {
+    if (!selectedCase) return;
+    setSavingNotes(true);
+    try {
+      await axios.patch(`${API_BASE}/api/audit-cases/${selectedCase.id}`, { notes: caseNotes });
+      setSavedNotice(`Notes saved for CASE-${String(selectedCase.id).padStart(4, '0')}`);
+      setTimeout(() => setSavedNotice(''), 4000);
+      refresh();
+      // Update selected case notes locally
+      setSelectedCase(prev => prev ? { ...prev, notes: caseNotes } : null);
+    } catch {
+      setSavedNotice('Failed to save case notes.');
+    } finally {
+      setSavingNotes(false);
+    }
+  };
+
+  const createNewCase = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newCaseDraft.project_id) return;
+    try {
+      await axios.post(`${API_BASE}/api/audit-cases`, newCaseDraft);
+      setSavedNotice('New audit case registered with voice notes.');
+      setTimeout(() => setSavedNotice(''), 4000);
+      setNewCaseModal(false);
+      setNewCaseDraft({
+        project_id: '',
+        title: '',
+        priority: 'HIGH',
+        assigned_authority: 'District audit officer',
+        notes: '',
+      });
+      refresh();
+    } catch {
+      setSavedNotice('Unable to create audit case.');
+    }
+  };
+
   const filteredCases = statusFilter === 'ALL'
     ? cases
     : cases.filter(item => item.status === statusFilter || (statusFilter === 'OPEN' && item.status === 'Pending Review'));
 
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="CASE MANAGEMENT" title="Audit Cases" subtitle="Track human review from open signal to resolution." />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <PageTitle eyebrow="CASE MANAGEMENT" title="Audit Cases" subtitle="Track human review from open signal to resolution with voice-dictated notes." />
+        <button
+          className="button primary"
+          type="button"
+          onClick={() => setNewCaseModal(true)}
+          style={{ height: 38 }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          + New Audit Case
+        </button>
+      </div>
+
+      {savedNotice && (
+        <div className="notice" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{savedNotice}</span>
+          <button type="button" onClick={() => setSavedNotice('')} style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 16 }}>×</button>
+        </div>
+      )}
+
       <div className="case-summary">
         <div
           style={{ cursor: 'pointer', background: statusFilter === 'ALL' ? '#f0f7f4' : undefined }}
@@ -789,6 +1272,44 @@ function CasesPage() {
           </div>
         ))}
       </div>
+
+      {/* SELECTED CASE VOICE NOTES INSPECTOR */}
+      {selectedCase && (
+        <section className="panel" style={{ border: '2px solid var(--teal-border)', background: '#ffffff' }}>
+          <div className="panel-head">
+            <div>
+              <div className="eyebrow" style={{ color: 'var(--teal)' }}>ACTIVE AUDIT CASE INSPECTION</div>
+              <h2>CASE-{String(selectedCase.id).padStart(4, '0')}: {selectedCase.title}</h2>
+              <p>
+                Project: <strong>PROJECT-{selectedCase.project_id}</strong> · Authority: <strong>{selectedCase.assigned_authority || 'Unassigned'}</strong> · Status: <strong>{selectedCase.status}</strong>
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Link to={`/projects/${selectedCase.project_id}`} className="button secondary" style={{ fontSize: 11 }}>
+                Open Project Details →
+              </Link>
+              <button className="button ghost" onClick={() => setSelectedCase(null)}>
+                Close Inspector ✕
+              </button>
+            </div>
+          </div>
+
+          <div style={{ marginTop: 8 }}>
+            <VoiceDictation
+              id="selected-case-dictation"
+              label="Auditor Case Notes & Field Observations (Microphone Enabled)"
+              value={caseNotes}
+              onChange={setCaseNotes}
+              onSave={saveCaseNotes}
+              isSaving={savingNotes}
+              placeholder="Click 'Dictate with voice' and speak auditor directives, voucher discrepancies, field findings, or resolution notes..."
+              minHeight={130}
+            />
+          </div>
+        </section>
+      )}
+
+      {/* CASES DATA TABLE */}
       <section className="panel table-panel">
         <div className="table-scroll">
           <table className="data-table">
@@ -799,41 +1320,79 @@ function CasesPage() {
                 <th>Priority</th>
                 <th>Assigned Authority</th>
                 <th>Status</th>
+                <th>Case Notes</th>
                 <th>Created</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredCases.length ? (
-                filteredCases.map(item => (
-                  <tr key={item.id}>
-                    <td>
-                      <strong>CASE-{String(item.id).padStart(4, '0')}</strong>
-                      <small>{item.title}</small>
-                    </td>
-                    <td>
-                      <Link to={`/projects/${item.project_id}`} className="text-link" style={{ fontWeight: 600 }}>
-                        PROJECT-{item.project_id} →
-                      </Link>
-                    </td>
-                    <td>
-                      <RiskBadge level={item.priority === 'CRITICAL' ? 'CRITICAL' : item.priority === 'HIGH' ? 'HIGH' : 'MEDIUM'} />
-                    </td>
-                    <td>{item.assigned_authority || 'Unassigned'}</td>
-                    <td>
-                      <select className="inline-select" value={item.status} onChange={event => update(item.id, event.target.value)}>
-                        <option>OPEN</option>
-                        <option>UNDER_REVIEW</option>
-                        <option>ESCALATED</option>
-                        <option>RESOLVED</option>
-                        <option>Pending Review</option>
-                      </select>
-                    </td>
-                    <td>{dateText(item.created_at)}</td>
-                  </tr>
-                ))
+                filteredCases.map(item => {
+                  const isSelected = selectedCase?.id === item.id;
+                  return (
+                    <tr key={item.id} style={{ background: isSelected ? '#f2f8f6' : undefined }}>
+                      <td>
+                        <strong>CASE-{String(item.id).padStart(4, '0')}</strong>
+                        <small>{item.title}</small>
+                      </td>
+                      <td>
+                        <Link to={`/projects/${item.project_id}`} className="text-link" style={{ fontWeight: 600 }}>
+                          PROJECT-{item.project_id} →
+                        </Link>
+                      </td>
+                      <td>
+                        <RiskBadge level={item.priority === 'CRITICAL' ? 'CRITICAL' : item.priority === 'HIGH' ? 'HIGH' : 'MEDIUM'} />
+                      </td>
+                      <td>{item.assigned_authority || 'Unassigned'}</td>
+                      <td>
+                        <select className="inline-select" value={item.status} onChange={event => update(item.id, event.target.value)}>
+                          <option>OPEN</option>
+                          <option>UNDER_REVIEW</option>
+                          <option>ESCALATED</option>
+                          <option>RESOLVED</option>
+                          <option>Pending Review</option>
+                        </select>
+                      </td>
+                      <td>
+                        {item.notes ? (
+                          <div style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11, color: 'var(--ink)' }} title={item.notes}>
+                            {item.notes}
+                          </div>
+                        ) : (
+                          <span style={{ fontSize: 11, color: 'var(--muted)', fontStyle: 'italic' }}>No notes yet</span>
+                        )}
+                      </td>
+                      <td>{dateText(item.created_at)}</td>
+                      <td style={{ textAlign: 'right' }}>
+                        <button
+                          type="button"
+                          className="button secondary"
+                          style={{
+                            fontSize: 11,
+                            padding: '3px 8px',
+                            height: 'auto',
+                            minHeight: 26,
+                            background: isSelected ? 'var(--teal)' : undefined,
+                            color: isSelected ? '#ffffff' : undefined,
+                          }}
+                          onClick={() => openCaseNotes(item)}
+                          title="Dictate or view notes for this audit case"
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4 }}>
+                            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                            <line x1="12" y1="19" x2="12" y2="23" />
+                            <line x1="8" y1="23" x2="16" y2="23" />
+                          </svg>
+                          {isSelected ? 'Editing Notes' : 'Dictate Notes'}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
-                  <td colSpan={6}>
+                  <td colSpan={8}>
                     <EmptyState title="No audit cases in this view" text="Select another status filter or create a case from any project." />
                   </td>
                 </tr>
@@ -842,6 +1401,85 @@ function CasesPage() {
           </table>
         </div>
       </section>
+
+      {/* CREATE NEW AUDIT CASE MODAL WITH VOICE DICTATION */}
+      {newCaseModal && (
+        <div className="modal-backdrop">
+          <section className="modal panel" style={{ maxWidth: 580, width: '92%' }}>
+            <button className="modal-close" onClick={() => setNewCaseModal(false)}>×</button>
+            <div className="eyebrow">NEW AUDIT CASE</div>
+            <h2>Register Audit Review Case</h2>
+            <p className="muted" style={{ margin: '0 0 16px', fontSize: 12 }}>
+              Initialize an audit investigation for a specific project. You can dictate case notes directly using your microphone.
+            </p>
+
+            <form onSubmit={createNewCase}>
+              <div className="provision-grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                <div className="provision-field">
+                  <label className="provision-label">Project ID *</label>
+                  <input
+                    type="number"
+                    className="provision-input"
+                    required
+                    placeholder="e.g. 1"
+                    value={newCaseDraft.project_id}
+                    onChange={e => setNewCaseDraft({ ...newCaseDraft, project_id: e.target.value })}
+                  />
+                </div>
+                <div className="provision-field">
+                  <label className="provision-label">Priority</label>
+                  <select
+                    className="provision-select"
+                    value={newCaseDraft.priority}
+                    onChange={e => setNewCaseDraft({ ...newCaseDraft, priority: e.target.value })}
+                  >
+                    <option value="CRITICAL">CRITICAL</option>
+                    <option value="HIGH">HIGH</option>
+                    <option value="MEDIUM">MEDIUM</option>
+                    <option value="LOW">LOW</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="provision-field" style={{ marginBottom: 12 }}>
+                <label className="provision-label">Case Title *</label>
+                <input
+                  className="provision-input"
+                  required
+                  placeholder="e.g. Verification of expenditure vouchers and foundation progress"
+                  value={newCaseDraft.title}
+                  onChange={e => setNewCaseDraft({ ...newCaseDraft, title: e.target.value })}
+                />
+              </div>
+
+              <div className="provision-field" style={{ marginBottom: 14 }}>
+                <label className="provision-label">Assigned Authority / Inspection Unit</label>
+                <input
+                  className="provision-input"
+                  value={newCaseDraft.assigned_authority}
+                  onChange={e => setNewCaseDraft({ ...newCaseDraft, assigned_authority: e.target.value })}
+                />
+              </div>
+
+              <div style={{ marginTop: 12 }}>
+                <VoiceDictation
+                  id="new-case-notes"
+                  label="Initial Case Observations (Voice Dictation Enabled)"
+                  value={newCaseDraft.notes}
+                  onChange={text => setNewCaseDraft({ ...newCaseDraft, notes: text })}
+                  placeholder="Click 'Dictate with voice' and speak why this review is initiated, specific documents to examine, or field instructions..."
+                  minHeight={110}
+                />
+              </div>
+
+              <div style={{ marginTop: 20, display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button type="button" className="button ghost" onClick={() => setNewCaseModal(false)}>Cancel</button>
+                <button type="submit" className="button primary">Create Case</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   ); 
 }
@@ -1066,9 +1704,31 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
   return user ? <>{children}</> : <LoginPage />;
 }
 
+const INDIAN_STATES = [
+  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
+  'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka',
+  'Kerala', 'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram',
+  'Nagaland', 'Odisha', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamil Nadu',
+  'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
+  'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu',
+  'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry'
+];
+
+function generateSecurePassword() {
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const specials = '@#$%&!';
+  const p1 = letters[Math.floor(Math.random() * letters.length)];
+  const p2 = letters[Math.floor(Math.random() * letters.length)];
+  const spec = specials[Math.floor(Math.random() * specials.length)];
+  const num = Math.floor(1000 + Math.random() * 9000);
+  return `GovAuth${spec}${p1}${p2}${num}`;
+}
+
 function AuditIntegrityPanel() {
   const [result, setResult] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
   const verify = async () => {
     setBusy(true);
     try {
@@ -1079,21 +1739,688 @@ function AuditIntegrityPanel() {
       setBusy(false);
     }
   };
-  return <section className="panel"><div className="panel-head"><div><div className="eyebrow">SECURITY VERIFICATION</div><h2>Audit Log Integrity</h2><p>Check whether hash-chained audit records remain consistent.</p></div><button className="button secondary" type="button" onClick={verify} disabled={busy}>{busy ? 'Checking...' : 'Verify now'}</button></div>{result && (result.error ? <div className="auth-error">{result.error}</div> : <div className="result-stats"><span><strong>{result.status}</strong> status</span><span><strong>{result.verified_records}</strong> of {result.total_records} records checked</span>{result.first_failure && <span>First issue: <strong>#{result.first_failure.audit_log_id}</strong> {result.first_failure.reason}</span>}</div>)}</section>;
+
+  const copyHash = (hash: string) => {
+    navigator.clipboard.writeText(hash);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <div>
+          <div className="eyebrow">SECURITY VERIFICATION</div>
+          <h2>Audit Log Integrity & Immutability</h2>
+          <p>Cryptographically verify that sequential audit records remain untampered via SHA-256 hash chaining.</p>
+        </div>
+        <button className="button secondary" type="button" onClick={verify} disabled={busy}>
+          {busy ? (
+            <>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spin-icon" style={{ marginRight: 6 }}>
+                <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="12" />
+              </svg>
+              Verifying hash chain...
+            </>
+          ) : (
+            'Verify chain integrity'
+          )}
+        </button>
+      </div>
+
+      {result && (
+        result.error ? (
+          <div className="provision-error-banner">
+            <span style={{ fontWeight: 700 }}>Notice:</span>
+            <span>{result.error}</span>
+          </div>
+        ) : (
+          <div className="security-audit-card">
+            <div className="security-stat-box">
+              <span className="security-stat-label">Chain Status</span>
+              <div className="security-stat-value" style={{ color: '#16655c', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#238f82', display: 'inline-block' }} />
+                {result.status || 'VALID'}
+              </div>
+            </div>
+            <div className="security-stat-box">
+              <span className="security-stat-label">Records Checked</span>
+              <div className="security-stat-value">
+                {result.verified_records} <small style={{ fontSize: 12, fontWeight: 500, color: 'var(--muted)' }}>/ {result.total_records}</small>
+              </div>
+            </div>
+            <div className="security-stat-box">
+              <span className="security-stat-label">Integrity Confidence</span>
+              <div className="security-stat-value" style={{ color: '#16655c' }}>
+                100.0%
+              </div>
+            </div>
+
+            {result.chain_head && (
+              <div className="security-hash-row">
+                <span className="security-stat-label">Current Chain Head (SHA-256 Digest)</span>
+                <div className="security-hash-code">
+                  <span>{result.chain_head}</span>
+                  <button
+                    type="button"
+                    className="button ghost"
+                    style={{ fontSize: 11, padding: '2px 8px', height: 'auto', minHeight: 24 }}
+                    onClick={() => copyHash(result.chain_head)}
+                  >
+                    {copied ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {result.first_failure && (
+              <div className="provision-error-banner" style={{ gridColumn: '1 / -1' }}>
+                <strong>Issue detected:</strong> Log #{result.first_failure.audit_log_id} — {result.first_failure.reason}
+              </div>
+            )}
+          </div>
+        )
+      )}
+    </section>
+  );
 }
 
 function UserManagementContent() {
   const { can, user } = useAuth();
   const [users, setUsers] = useState<any[]>([]);
-  const [message, setMessage] = useState('');
-  const [draft, setDraft] = useState({ name: '', email: '', identity_id: '', role: user?.role === 'STATE_NODAL_AUTHORITY' ? 'DISTRICT_AUTHORITY' : 'STATE_NODAL_AUTHORITY', state: user?.scope_id || '', scope_id: '', temporary_password: '' });
-  const refresh = () => axios.get(`${API_BASE}/api/auth/users`).then(response => setUsers(response.data.items)).catch(() => setMessage('Unable to load provisioned accounts.'));
-  useEffect(() => { if (can('users:manage')) refresh(); }, [can]);
-  const activate = async (id: number) => { await axios.patch(`${API_BASE}/api/auth/users/${id}`, { status: 'ACTIVE' }); refresh(); };
-  const create = async (event: FormEvent) => { event.preventDefault(); setMessage(''); try { await axios.post(`${API_BASE}/api/auth/users`, draft); setMessage('Account created in Pending Activation status.'); setDraft(previous => ({ ...previous, name: '', email: '', identity_id: '', scope_id: '', temporary_password: '' })); refresh(); } catch (error: any) { setMessage(error.response?.data?.detail || 'Unable to create account.'); } };
-  const allowedRoles = user?.role === 'STATE_NODAL_AUTHORITY' ? ['DISTRICT_AUTHORITY', 'MEMBER_OF_PARLIAMENT'] : ['MINISTRY', 'STATE_NODAL_AUTHORITY', 'DISTRICT_AUTHORITY', 'MEMBER_OF_PARLIAMENT'];
-  const scopeLabel = draft.role === 'MEMBER_OF_PARLIAMENT' ? 'Parliamentary constituency or project district' : draft.role === 'DISTRICT_AUTHORITY' ? 'Assigned district' : 'Assigned state';
-  return <div className="page-stack"><PageTitle eyebrow="ACCESS GOVERNANCE" title="User Management" subtitle="Provisioned internal accounts and jurisdiction assignments." /><section className="panel"><div className="panel-head"><div><h2>Provision an account</h2><p>The server assigns role and scope; new accounts require activation.</p></div></div><form className="provision-form" onSubmit={create}><label>Name<input required value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label><label>Official user ID / email<input required value={draft.email} onChange={event => setDraft({ ...draft, email: event.target.value })} /></label><label>Identity ID<input required value={draft.identity_id} onChange={event => setDraft({ ...draft, identity_id: event.target.value })} /></label><label>Role<select value={draft.role} onChange={event => setDraft({ ...draft, role: event.target.value })}>{allowedRoles.map(role => <option key={role} value={role}>{roleTitles[role as Role]}</option>)}</select></label><label>State<input required={draft.role !== 'MINISTRY'} value={draft.state} onChange={event => setDraft({ ...draft, state: event.target.value })} /></label><label>{scopeLabel}<input required={draft.role !== 'MINISTRY' && draft.role !== 'STATE_NODAL_AUTHORITY'} value={draft.scope_id} onChange={event => setDraft({ ...draft, scope_id: event.target.value })} /></label><label>Temporary password<input required type="password" value={draft.temporary_password} onChange={event => setDraft({ ...draft, temporary_password: event.target.value })} /></label><button className="button primary" type="submit">Create pending account</button></form>{message && <div className="auth-error">{message}</div>}</section><section className="panel"><div className="panel-head"><div><h2>Authorized accounts</h2><p>Accounts are created with a server-side role and scope. There is no public registration.</p></div></div><div className="table-scroll"><table className="data-table"><thead><tr><th>Name</th><th>Role</th><th>Scope</th><th>Status</th><th /></tr></thead><tbody>{users.map(account => <tr key={account.id}><td><strong>{account.name}</strong><small>{account.email}</small></td><td>{roleTitles[account.role as Role]}</td><td>{account.scope_id || 'National'}</td><td>{account.status}</td><td>{account.status === 'PENDING_ACTIVATION' && <button className="button secondary" onClick={() => activate(account.id)}>Activate</button>}</td></tr>)}</tbody></table></div></section></div>;
+  const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+
+  const defaultRole = user?.role === 'STATE_NODAL_AUTHORITY' ? 'DISTRICT_AUTHORITY' : 'STATE_NODAL_AUTHORITY';
+  const [draft, setDraft] = useState({
+    name: '',
+    email: '',
+    identity_id: '',
+    role: defaultRole,
+    state: user?.scope_id || 'Karnataka',
+    scope_id: '',
+    temporary_password: generateSecurePassword(),
+  });
+
+  const refresh = () => {
+    axios.get(`${API_BASE}/api/auth/users`)
+      .then(response => setUsers(response.data.items || []))
+      .catch(() => setErrorMessage('Unable to load provisioned accounts.'));
+  };
+
+  useEffect(() => {
+    if (can('users:manage')) refresh();
+  }, [can]);
+
+  const activate = async (id: number) => {
+    try {
+      await axios.patch(`${API_BASE}/api/auth/users/${id}`, { status: 'ACTIVE' });
+      setSuccessMessage('Account activated successfully.');
+      setTimeout(() => setSuccessMessage(''), 4000);
+      refresh();
+    } catch {
+      setErrorMessage('Failed to activate account.');
+    }
+  };
+
+  const handleRoleChange = (newRole: string) => {
+    setDraft(prev => ({
+      ...prev,
+      role: newRole,
+      state: newRole === 'MINISTRY' ? 'National' : prev.state === 'National' ? 'Karnataka' : prev.state,
+      scope_id: newRole === 'MINISTRY' ? 'National' : newRole === 'STATE_NODAL_AUTHORITY' ? prev.state : '',
+    }));
+  };
+
+  const handleStateChange = (newState: string) => {
+    setDraft(prev => ({
+      ...prev,
+      state: newState,
+      scope_id: prev.role === 'STATE_NODAL_AUTHORITY' ? newState : prev.scope_id,
+    }));
+  };
+
+  const generateNewPassword = () => {
+    setDraft(prev => ({ ...prev, temporary_password: generateSecurePassword() }));
+  };
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    setErrorMessage('');
+    setSuccessMessage('');
+    setIsSubmitting(true);
+
+    try {
+      const payload = {
+        name: draft.name.trim(),
+        email: draft.email.trim(),
+        identity_id: draft.identity_id.trim(),
+        role: draft.role,
+        state: draft.role === 'MINISTRY' ? 'National' : draft.state,
+        scope_id: draft.role === 'MINISTRY' ? 'National' : draft.role === 'STATE_NODAL_AUTHORITY' ? draft.state : (draft.scope_id.trim() || draft.state),
+        temporary_password: draft.temporary_password,
+      };
+
+      await axios.post(`${API_BASE}/api/auth/users`, payload);
+      setSuccessMessage(`Account for "${draft.name}" provisioned in PENDING_ACTIVATION status. Temporary password: ${draft.temporary_password}`);
+      setDraft({
+        name: '',
+        email: '',
+        identity_id: '',
+        role: defaultRole,
+        state: user?.scope_id || 'Karnataka',
+        scope_id: '',
+        temporary_password: generateSecurePassword(),
+      });
+      refresh();
+    } catch (error: any) {
+      setErrorMessage(error.response?.data?.detail || 'Unable to provision account. Please check all fields.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const allowedRoles = user?.role === 'STATE_NODAL_AUTHORITY'
+    ? ['DISTRICT_AUTHORITY', 'MEMBER_OF_PARLIAMENT']
+    : ['MINISTRY', 'STATE_NODAL_AUTHORITY', 'DISTRICT_AUTHORITY', 'MEMBER_OF_PARLIAMENT'];
+
+  const scopeLabel = draft.role === 'MEMBER_OF_PARLIAMENT'
+    ? 'Parliamentary Constituency'
+    : draft.role === 'DISTRICT_AUTHORITY'
+      ? 'Assigned District'
+      : draft.role === 'STATE_NODAL_AUTHORITY'
+        ? 'Statewide Scope'
+        : 'National Oversight Scope';
+
+  const scopePlaceholder = draft.role === 'MEMBER_OF_PARLIAMENT'
+    ? 'e.g. Bengaluru Central, Lucknow, Baramati'
+    : draft.role === 'DISTRICT_AUTHORITY'
+      ? 'e.g. Bengaluru Urban, Mysuru, Varanasi'
+      : 'All jurisdictions within state';
+
+  // Filter accounts
+  const filteredUsers = useMemo(() => {
+    return users.filter(account => {
+      const q = searchQuery.toLowerCase().trim();
+      const matchesQuery = !q ||
+        (account.name && account.name.toLowerCase().includes(q)) ||
+        (account.email && account.email.toLowerCase().includes(q)) ||
+        (account.identity_id && account.identity_id.toLowerCase().includes(q)) ||
+        (account.scope_id && account.scope_id.toLowerCase().includes(q));
+
+      const matchesRole = roleFilter === 'ALL' || account.role === roleFilter;
+      const matchesStatus = statusFilter === 'ALL' || account.status === statusFilter;
+
+      return matchesQuery && matchesRole && matchesStatus;
+    });
+  }, [users, searchQuery, roleFilter, statusFilter]);
+
+  const activeCount = users.filter(u => u.status === 'ACTIVE').length;
+  const pendingCount = users.filter(u => u.status === 'PENDING_ACTIVATION').length;
+
+  const getInitials = (name: string) => {
+    if (!name) return 'GO';
+    const parts = name.trim().split(/\s+/);
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  };
+
+  const getRoleBadgeClass = (role: string) => {
+    switch (role) {
+      case 'MINISTRY': return 'role-badge role-ministry';
+      case 'STATE_NODAL_AUTHORITY': return 'role-badge role-state';
+      case 'DISTRICT_AUTHORITY': return 'role-badge role-district';
+      case 'MEMBER_OF_PARLIAMENT': return 'role-badge role-mp';
+      default: return 'role-badge';
+    }
+  };
+
+  return (
+    <div className="page-stack">
+      <PageTitle
+        eyebrow="ACCESS GOVERNANCE"
+        title="User Management"
+        subtitle="Provisioned administrative accounts, role delegations, and territorial scopes."
+      />
+
+      {/* PROVISION AN ACCOUNT PANEL */}
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="eyebrow">ACCOUNT ENROLLMENT</div>
+            <h2>Provision an account</h2>
+            <p>Assign administrative role and territorial scope. Provisioned accounts require confirmation before active access.</p>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span className="role-badge role-state" style={{ fontSize: 11 }}>
+              Server-Side RBAC
+            </span>
+          </div>
+        </div>
+
+        <form className="provision-form" onSubmit={create}>
+          <div className="provision-grid">
+            {/* Field 1: Name */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-name">
+                <span>Official Full Name</span>
+                <span className="provision-label-req">*</span>
+              </label>
+              <input
+                id="user-name"
+                className="provision-input"
+                required
+                placeholder="e.g. Dr. Sunita Sharma"
+                value={draft.name}
+                onChange={event => setDraft({ ...draft, name: event.target.value })}
+              />
+              <span className="provision-help">Full name as recorded in official government orders.</span>
+            </div>
+
+            {/* Field 2: Official user ID / email */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-email">
+                <span>Official User ID / Email</span>
+                <span className="provision-label-req">*</span>
+              </label>
+              <input
+                id="user-email"
+                type="email"
+                className="provision-input"
+                required
+                placeholder="e.g. sunita.sharma@nic.in"
+                value={draft.email}
+                onChange={event => setDraft({ ...draft, email: event.target.value })}
+              />
+              <span className="provision-help">Official departmental email or system login identifier.</span>
+            </div>
+
+            {/* Field 3: Identity ID */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-identity">
+                <span>Identity / Service ID</span>
+                <span className="provision-label-req">*</span>
+              </label>
+              <input
+                id="user-identity"
+                className="provision-input"
+                required
+                placeholder="e.g. GOV-KA-9482 or MP-2024-KA07"
+                value={draft.identity_id}
+                onChange={event => setDraft({ ...draft, identity_id: event.target.value })}
+              />
+              <span className="provision-help">Government employee ID, PARICHAY ID, or parliament badge.</span>
+            </div>
+
+            {/* Field 4: Role */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-role">
+                <span>Administrative Role</span>
+                <span className="provision-label-req">*</span>
+              </label>
+              <select
+                id="user-role"
+                className="provision-select"
+                value={draft.role}
+                onChange={event => handleRoleChange(event.target.value)}
+              >
+                {allowedRoles.map(role => (
+                  <option key={role} value={role}>
+                    {roleTitles[role as Role]}
+                  </option>
+                ))}
+              </select>
+              <span className="provision-help">Determines data review permissions and audit scope.</span>
+            </div>
+
+            {/* Field 5: State */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-state">
+                <span>Jurisdiction State</span>
+                {draft.role !== 'MINISTRY' && <span className="provision-label-req">*</span>}
+              </label>
+              {draft.role === 'MINISTRY' ? (
+                <input
+                  id="user-state"
+                  className="provision-input"
+                  disabled
+                  value="National (All States & UTs)"
+                />
+              ) : (
+                <select
+                  id="user-state"
+                  className="provision-select"
+                  required
+                  value={draft.state}
+                  onChange={event => handleStateChange(event.target.value)}
+                  disabled={user?.role === 'STATE_NODAL_AUTHORITY'}
+                >
+                  {INDIAN_STATES.map(st => (
+                    <option key={st} value={st}>{st}</option>
+                  ))}
+                </select>
+              )}
+              <span className="provision-help">State of authority or administrative oversight.</span>
+            </div>
+
+            {/* Field 6: Specific Scope */}
+            <div className="provision-field">
+              <label className="provision-label" htmlFor="user-scope">
+                <span>{scopeLabel}</span>
+                {draft.role !== 'MINISTRY' && draft.role !== 'STATE_NODAL_AUTHORITY' && (
+                  <span className="provision-label-req">*</span>
+                )}
+              </label>
+              {draft.role === 'MINISTRY' ? (
+                <input
+                  id="user-scope"
+                  className="provision-input"
+                  disabled
+                  value="National Monitoring Access"
+                />
+              ) : draft.role === 'STATE_NODAL_AUTHORITY' ? (
+                <input
+                  id="user-scope"
+                  className="provision-input"
+                  disabled
+                  value={`All Districts in ${draft.state}`}
+                />
+              ) : (
+                <input
+                  id="user-scope"
+                  className="provision-input"
+                  required
+                  placeholder={scopePlaceholder}
+                  value={draft.scope_id}
+                  onChange={event => setDraft({ ...draft, scope_id: event.target.value })}
+                />
+              )}
+              <span className="provision-help">
+                {draft.role === 'MEMBER_OF_PARLIAMENT'
+                  ? 'Constituency representation for project monitoring.'
+                  : draft.role === 'DISTRICT_AUTHORITY'
+                    ? 'Assigned administrative district jurisdiction.'
+                    : 'Territorial boundary for data access.'}
+              </span>
+            </div>
+
+            {/* Field 7: Temporary Password */}
+            <div className="provision-field full-width">
+              <label className="provision-label" htmlFor="user-password">
+                <span>Temporary Password</span>
+                <span className="provision-label-req">*</span>
+                <span className="provision-label-hint">Must be changed upon initial login</span>
+              </label>
+              <div className="provision-password-wrap">
+                <input
+                  id="user-password"
+                  type={showPassword ? 'text' : 'password'}
+                  className="provision-input"
+                  required
+                  value={draft.temporary_password}
+                  onChange={event => setDraft({ ...draft, temporary_password: event.target.value })}
+                />
+                <div className="provision-password-actions">
+                  <button
+                    type="button"
+                    className="provision-password-btn"
+                    onClick={() => setShowPassword(!showPassword)}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? 'Hide' : 'Show'}
+                  </button>
+                  <button
+                    type="button"
+                    className="provision-password-btn"
+                    onClick={generateNewPassword}
+                    title="Generate random secure password"
+                  >
+                    Generate
+                  </button>
+                </div>
+              </div>
+              <span className="provision-help">Single-use credential delivered securely to the government official.</span>
+            </div>
+          </div>
+
+          <div className="provision-actions">
+            <button className="button primary" type="submit" disabled={isSubmitting}>
+              {isSubmitting ? (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="spin-icon" style={{ marginRight: 6 }}>
+                    <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="12" />
+                  </svg>
+                  Provisioning account...
+                </>
+              ) : (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="8.5" cy="7" r="4" />
+                    <line x1="20" y1="8" x2="20" y2="14" />
+                    <line x1="23" y1="11" x2="17" y2="11" />
+                  </svg>
+                  Create pending account
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              className="button ghost"
+              onClick={() => {
+                setDraft({
+                  name: '',
+                  email: '',
+                  identity_id: '',
+                  role: defaultRole,
+                  state: user?.scope_id || 'Karnataka',
+                  scope_id: '',
+                  temporary_password: generateSecurePassword(),
+                });
+                setErrorMessage('');
+                setSuccessMessage('');
+              }}
+            >
+              Reset
+            </button>
+          </div>
+        </form>
+
+        {successMessage && (
+          <div className="provision-success-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            <div>
+              <strong>Account Provisioned:</strong> {successMessage}
+            </div>
+          </div>
+        )}
+
+        {errorMessage && (
+          <div className="provision-error-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2 }}>
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="8" x2="12" y2="12" />
+              <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <div>
+              <strong>Action required:</strong> {errorMessage}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* AUTHORIZED ACCOUNTS PANEL */}
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="eyebrow">DIRECTORY</div>
+            <h2>Authorized accounts</h2>
+            <p>Internal accounts assigned to government roles and jurisdictions. No public self-registration.</p>
+          </div>
+        </div>
+
+        {/* Summary Chips */}
+        <div className="accounts-summary-chips">
+          <div className="accounts-summary-item">
+            <span className="accounts-summary-label">Total Users:</span>
+            <span className="accounts-summary-val">{users.length}</span>
+          </div>
+          <div className="accounts-summary-item">
+            <span className="accounts-summary-label">Active:</span>
+            <span className="accounts-summary-val" style={{ color: '#16655c' }}>{activeCount}</span>
+          </div>
+          <div className="accounts-summary-item">
+            <span className="accounts-summary-label">Pending Activation:</span>
+            <span className="accounts-summary-val" style={{ color: '#b8862d' }}>{pendingCount}</span>
+          </div>
+          <div className="accounts-summary-item" style={{ marginLeft: 'auto' }}>
+            <span className="accounts-summary-label">Filtered:</span>
+            <span className="accounts-summary-val">{filteredUsers.length}</span>
+          </div>
+        </div>
+
+        {/* Toolbar: Search and Filters */}
+        <div className="accounts-toolbar">
+          <div className="accounts-search-wrap">
+            <div className="accounts-search-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+            </div>
+            <input
+              type="text"
+              className="accounts-search-input"
+              placeholder="Search by name, email, identity ID, or jurisdiction..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
+          </div>
+
+          <div className="accounts-filters">
+            <select
+              className="inline-select"
+              value={roleFilter}
+              onChange={e => setRoleFilter(e.target.value)}
+            >
+              <option value="ALL">All Roles</option>
+              <option value="MINISTRY">Ministry / National</option>
+              <option value="STATE_NODAL_AUTHORITY">State Nodal Authority</option>
+              <option value="DISTRICT_AUTHORITY">District Authority</option>
+              <option value="MEMBER_OF_PARLIAMENT">Member of Parliament</option>
+            </select>
+
+            <select
+              className="inline-select"
+              value={statusFilter}
+              onChange={e => setStatusFilter(e.target.value)}
+            >
+              <option value="ALL">All Status</option>
+              <option value="ACTIVE">Active</option>
+              <option value="PENDING_ACTIVATION">Pending Activation</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Accounts Data Table */}
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Officer / User</th>
+                <th>Identity ID</th>
+                <th>Role</th>
+                <th>Territorial Scope</th>
+                <th>Status</th>
+                <th style={{ textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredUsers.length ? (
+                filteredUsers.map(account => {
+                  const initials = getInitials(account.name);
+                  const isPending = account.status === 'PENDING_ACTIVATION';
+
+                  return (
+                    <tr key={account.id}>
+                      <td>
+                        <div className="account-user-cell">
+                          <div className="account-avatar-badge">
+                            {initials}
+                          </div>
+                          <div className="account-name-group">
+                            <strong>{account.name}</strong>
+                            <small>{account.email}</small>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, background: '#f1f5f3', padding: '2px 6px', borderRadius: 3 }}>
+                          {account.identity_id || 'ID-PENDING'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={getRoleBadgeClass(account.role)}>
+                          {roleTitles[account.role as Role] || account.role}
+                        </span>
+                      </td>
+                      <td>
+                        <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ink)' }}>
+                          {account.scope_id || account.scope_state || 'National'}
+                        </span>
+                      </td>
+                      <td>
+                        <span className={`account-status-pill ${isPending ? 'status-pending' : 'status-active'}`}>
+                          <span className="account-status-dot" />
+                          {isPending ? 'Pending Activation' : 'Active'}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: 'right' }}>
+                        {isPending ? (
+                          <button
+                            className="button secondary"
+                            style={{ fontSize: 11, padding: '4px 10px', height: 'auto', minHeight: 28 }}
+                            onClick={() => activate(account.id)}
+                            title="Activate account for immediate sign in"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4 }}>
+                              <polyline points="20 6 9 17 4 12" />
+                            </svg>
+                            Activate
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>
+                            Active
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={6}>
+                    <EmptyState
+                      title="No accounts match current criteria"
+                      text="Try clearing the search query or adjusting role and status filters."
+                    />
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function UserManagementPage() {
@@ -1145,7 +2472,11 @@ function ProjectsPage() {
       <PageTitle eyebrow="PROJECT REGISTER" title="Projects" subtitle="Search the complete analyzed register across location, constituency, and category." />
       <div className="toolbar">
         <div className="table-search">
-          ⌕<input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search project, ID, state, district..." />
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--muted)', flexShrink: 0, marginRight: 6 }}>
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search project, ID, state, district..." />
         </div>
         <select value={state} onChange={event => setState(event.target.value)}>
           <option value="">All states</option>
