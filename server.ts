@@ -687,16 +687,27 @@ app.get('/api/dashboard', (req, res) => {
   };
 
   // State wise aggregates
-  const statesMap: Record<string, { projects: number; sanctioned: number; expenditure: number; riskSum: number; high_risk: number; critical: number }> = {};
+  const statesMap: Record<string, {
+    projects: number;
+    sanctioned: number;
+    expenditure: number;
+    riskSum: number;
+    high_risk: number;
+    critical: number;
+    categories: Record<string, number>;
+  }> = {};
   for (const p of filtered) {
     if (!statesMap[p.state]) {
-      statesMap[p.state] = { projects: 0, sanctioned: 0, expenditure: 0, riskSum: 0, high_risk: 0, critical: 0 };
+      statesMap[p.state] = { projects: 0, sanctioned: 0, expenditure: 0, riskSum: 0, high_risk: 0, critical: 0, categories: {} };
     }
     const item = statesMap[p.state];
     item.projects += 1;
     item.sanctioned += p.sanction_amount;
     item.expenditure += p.expenditure;
     item.riskSum += p.risk_score;
+    if (p.category) {
+      item.categories[p.category] = (item.categories[p.category] || 0) + 1;
+    }
     if (p.risk_level === 'HIGH') item.high_risk += 1;
     if (p.risk_level === 'CRITICAL') item.critical += 1;
   }
@@ -704,10 +715,15 @@ app.get('/api/dashboard', (req, res) => {
     name,
     projects: data.projects,
     sanctioned: data.sanctioned,
+    total_sanctioned_amount: data.sanctioned,
     expenditure: data.expenditure,
     average_risk: data.projects ? Number((data.riskSum / data.projects).toFixed(1)) : 0,
     high_risk: data.high_risk,
     critical: data.critical,
+    top_sectors: Object.entries(data.categories || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([sector, count]) => ({ sector, count })),
   })).sort((a, b) => b.average_risk - a.average_risk);
 
   // Category wise aggregates
@@ -758,12 +774,15 @@ app.get('/api/dashboard', (req, res) => {
   ];
 
   const topProjects = [...filtered].sort((a, b) => b.risk_score - a.risk_score).slice(0, 10);
+  const nationalRiskSum = filtered.reduce((acc, p) => acc + (p.risk_score || 0), 0);
+  const nationalAverageRisk = filtered.length ? Number((nationalRiskSum / filtered.length).toFixed(1)) : 0;
 
   res.json({
     total_projects: filtered.length,
     total_sanction_amount: totalSanction,
     total_expenditure: totalExpenditure,
     total_utilization_ratio: totalSanction ? Number((totalExpenditure / totalSanction).toFixed(3)) : 0,
+    national_average_risk: nationalAverageRisk,
     high_risk_projects: highRisk + critical,
     critical_projects: critical,
     active_alerts: alerts.length,
@@ -910,6 +929,14 @@ app.post('/api/projects/:id/documents/checklist', (req, res) => {
   } else {
     auditFile.checklist.push({ item, completed: Boolean(completed) });
   }
+  res.json(auditFile);
+});
+
+app.post('/api/projects/:id/notes', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { notes } = req.body;
+  const auditFile = getProjectAuditFile(id);
+  auditFile.notes = typeof notes === 'string' ? notes : (notes || '');
   res.json(auditFile);
 });
 
@@ -1118,7 +1145,7 @@ app.patch('/api/audit-cases/:id', (req, res) => {
   if (!auditCase) return res.status(404).json({ detail: 'Audit case not found' });
   if (req.body.status) auditCase.status = req.body.status;
   if (req.body.assigned_authority) auditCase.assigned_authority = req.body.assigned_authority;
-  if (req.body.notes) auditCase.notes = req.body.notes;
+  if (req.body.notes !== undefined) auditCase.notes = req.body.notes;
   auditCase.updated_at = new Date().toISOString();
   res.json(auditCase);
 });
